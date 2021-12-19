@@ -1,4 +1,4 @@
-package libcore
+package stun
 
 import (
 	"fmt"

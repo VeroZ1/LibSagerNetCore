@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,11 +20,13 @@ import (
 	v2rayNet "github.com/v2fly/v2ray-core/v4/common/net"
 	"github.com/v2fly/v2ray-core/v4/common/session"
 	"github.com/v2fly/v2ray-core/v4/common/task"
+	"github.com/v2fly/v2ray-core/v4/features/dns/localdns"
 	"github.com/v2fly/v2ray-core/v4/transport"
 	"github.com/v2fly/v2ray-core/v4/transport/internet"
 	"github.com/v2fly/v2ray-core/v4/transport/pipe"
+	"libcore/constant"
 	"libcore/gvisor"
-	"libcore/lwip"
+	"libcore/nat"
 	"libcore/tun"
 )
 
@@ -49,31 +52,54 @@ type Tun2ray struct {
 	connections     list.List
 }
 
-const (
-	appStatusForeground = "foreground"
-	appStatusBackground = "background"
-)
+type TunConfig struct {
+	FileDescriptor      int32
+	Protect             bool
+	Protector           Protector
+	MTU                 int32
+	V2Ray               *V2RayInstance
+	VLAN4Router         string
+	IPv6Mode            int32
+	Implementation      int32
+	Sniffing            bool
+	OverrideDestination bool
+	Debug               bool
+	DumpUID             bool
+	TrafficStats        bool
+	PCap                bool
+	ErrorHandler        ErrorHandler
+	LocalResolver       LocalResolver
+}
 
-func NewTun2ray(fd int32, mtu int32, v2ray *V2RayInstance, router string, gVisor bool, sniffing bool, overrideDestination bool, debug bool, dumpUid bool, trafficStats bool, pcap bool) (*Tun2ray, error) {
-	if debug {
+type ErrorHandler interface {
+	HandleError(err string)
+}
+
+type LocalResolver interface {
+	LookupIP(network string, domain string) (string, error)
+}
+
+func NewTun2ray(config *TunConfig) (*Tun2ray, error) {
+	if config.Debug {
 		logrus.SetLevel(logrus.DebugLevel)
 	} else {
 		logrus.SetLevel(logrus.WarnLevel)
 	}
 	t := &Tun2ray{
-		router:              router,
-		v2ray:               v2ray,
-		sniffing:            sniffing,
-		overrideDestination: overrideDestination,
-		debug:               debug,
-		dumpUid:             dumpUid,
-		trafficStats:        trafficStats,
+		router:              config.VLAN4Router,
+		v2ray:               config.V2Ray,
+		sniffing:            config.Sniffing,
+		overrideDestination: config.OverrideDestination,
+		debug:               config.Debug,
+		dumpUid:             config.DumpUID,
+		trafficStats:        config.TrafficStats,
 	}
 
 	var err error
-	if gVisor {
+	switch config.Implementation {
+	case constant.TunImplementationGVisor:
 		var pcapFile *os.File
-		if pcap {
+		if config.PCap {
 			path := time.Now().UTC().String()
 			path = externalAssetsPath + "/pcap/" + path + ".pcap"
 			err = os.MkdirAll(filepath.Dir(path), 0o755)
@@ -86,29 +112,48 @@ func NewTun2ray(fd int32, mtu int32, v2ray *V2RayInstance, router string, gVisor
 			}
 		}
 
-		t.dev, err = gvisor.New(fd, mtu, t, gvisor.DefaultNIC, pcap, pcapFile, math.MaxUint32, ipv6Mode)
-	} else {
-		dev := os.NewFile(uintptr(fd), "")
-		if dev == nil {
-			return nil, newError("failed to open TUN file descriptor")
-		}
-		t.dev, err = lwip.New(dev, mtu, t)
+		t.dev, err = gvisor.New(config.FileDescriptor, config.MTU, t, gvisor.DefaultNIC, config.PCap, pcapFile, math.MaxUint32, config.IPv6Mode)
+	case constant.TunImplementationSystem:
+		t.dev, err = nat.New(config.FileDescriptor, config.MTU, t, config.IPv6Mode, config.ErrorHandler.HandleError)
 	}
+
 	if err != nil {
 		return nil, err
 	}
 
-	dc := v2ray.dnsClient
+	if !config.Protect {
+		config.Protector = noopProtectorInstance
+	}
+
+	dc := config.V2Ray.dnsClient
 	internet.UseAlternativeSystemDialer(&protectedDialer{
+		protector: config.Protector,
 		resolver: func(domain string) ([]net.IP, error) {
 			return dc.LookupIP(domain)
 		},
 	})
 
-	nc := &net.Resolver{PreferGo: false}
+	if !config.Protect {
+		localdns.SetLookupFunc(nil)
+	} else {
+		localdns.SetLookupFunc(func(network, host string) ([]v2rayNet.IP, error) {
+			response, err := config.LocalResolver.LookupIP(network, host)
+			if err != nil {
+				return nil, err
+			}
+			addrs := strings.Split(response, ",")
+			ips := make([]v2rayNet.IP, len(addrs))
+			for i, addr := range addrs {
+				ips[i] = net.ParseIP(addr)
+			}
+			return ips, nil
+		})
+	}
+
 	internet.UseAlternativeSystemDNSDialer(&protectedDialer{
+		protector: config.Protector,
 		resolver: func(domain string) ([]net.IP, error) {
-			return nc.LookupIP(context.Background(), "ip", domain)
+			return localdns.Instance.LookupIP(domain)
 		},
 	})
 
@@ -118,6 +163,8 @@ func NewTun2ray(fd int32, mtu int32, v2ray *V2RayInstance, router string, gVisor
 
 func (t *Tun2ray) Close() {
 	net.DefaultResolver.Dial = nil
+	localdns.SetLookupFunc(nil)
+
 	closeIgnore(t.dev)
 	t.connectionsLock.Lock()
 	for item := t.connections.Front(); item != nil; item = item.Next() {
@@ -162,12 +209,6 @@ func (t *Tun2ray) NewConnection(source v2rayNet.Destination, destination v2rayNe
 			}
 
 			inbound.Uid = uint32(uid)
-
-			if uid == foregroundUid || uid == foregroundImeUid {
-				inbound.AppStatus = append(inbound.AppStatus, appStatusForeground)
-			} else {
-				inbound.AppStatus = append(inbound.AppStatus, appStatusBackground)
-			}
 		}
 	}
 
@@ -236,10 +277,11 @@ func (t *Tun2ray) NewConnection(source v2rayNet.Destination, destination v2rayNe
 	if err = task.Run(ctx, func() error {
 		return buf.Copy(buf.NewReader(conn), input)
 	}); err != nil {
+		closeIgnore(conn, link.Reader, link.Writer)
 		newError("connection finished: ", err).AtDebug().WriteToLog()
+	} else {
+		closeIgnore(conn, link.Writer, link.Reader)
 	}
-
-	closeIgnore(conn, link.Reader, link.Writer)
 
 	t.connectionsLock.Lock()
 	t.connections.Remove(element)
@@ -270,20 +312,23 @@ func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.De
 		return true
 	}
 
+	var cond *sync.Cond
+
 	if sendTo() {
+		closeIgnore(closer)
 		return
 	} else {
 		iCond, loaded := t.lockTable.LoadOrStore(natKey, sync.NewCond(&sync.Mutex{}))
-		cond := iCond.(*sync.Cond)
+		cond = iCond.(*sync.Cond)
 		if loaded {
 			cond.L.Lock()
 			cond.Wait()
 			sendTo()
 			cond.L.Unlock()
+
+			closeIgnore(closer)
 			return
 		}
-		t.lockTable.Delete(natKey)
-		cond.Broadcast()
 	}
 
 	inbound := &session.Inbound{
@@ -330,12 +375,6 @@ func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.De
 			}
 
 			inbound.Uid = uint32(uid)
-			if uid == foregroundUid || uid == foregroundImeUid {
-				inbound.AppStatus = append(inbound.AppStatus, appStatusForeground)
-			} else {
-				inbound.AppStatus = append(inbound.AppStatus, appStatusBackground)
-			}
-
 		}
 
 	}
@@ -403,6 +442,9 @@ func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.De
 
 	go sendTo()
 
+	t.lockTable.Delete(natKey)
+	cond.Broadcast()
+
 	for {
 		buffer, addr, err := conn.readFrom()
 		if err != nil {
@@ -435,11 +477,11 @@ func (t *Tun2ray) dialDNS(ctx context.Context, _, _ string) (conn net.Conn, err 
 		SkipFakeDNS: true,
 	}), v2rayNet.Destination{
 		Network: v2rayNet.Network_UDP,
-		Address: v2rayNet.ParseAddress("1.0.0.1"),
+		Address: v2rayNet.ParseAddress(t.router),
 		Port:    53,
 	})
 	if err == nil {
-		conn = wrappedConn{conn}
+		conn = &wrappedConn{conn}
 	}
 	return
 }
@@ -448,7 +490,7 @@ type wrappedConn struct {
 	net.Conn
 }
 
-func (c wrappedConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+func (c *wrappedConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	n, err = c.Conn.Read(p)
 	if err == nil {
 		addr = c.Conn.RemoteAddr()
@@ -456,12 +498,6 @@ func (c wrappedConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	return
 }
 
-func (c wrappedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
+func (c *wrappedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
 	return c.Conn.Write(p)
-}
-
-var ipv6Mode int32
-
-func SetIPv6Mode(mode int32) {
-	ipv6Mode = mode
 }

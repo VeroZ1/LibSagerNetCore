@@ -15,10 +15,11 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"libcore/constant"
 	"libcore/tun"
 )
 
-//go:generate go run github.com/v2fly/v2ray-core/v4/common/errors/errorgen
+//go:generate go run ../errorgen
 
 var _ tun.Tun = (*GVisor)(nil)
 
@@ -50,7 +51,7 @@ func New(dev int32, mtu int32, handler tun.Handler, nicId tcpip.NICID, pcap bool
 	}
 	var o stack.Options
 	switch ipv6Mode {
-	case 0:
+	case constant.IPv6Disable:
 		o = stack.Options{
 			NetworkProtocols: []stack.NetworkProtocolFactory{
 				ipv4.NewProtocol,
@@ -61,7 +62,7 @@ func New(dev int32, mtu int32, handler tun.Handler, nicId tcpip.NICID, pcap bool
 				icmp.NewProtocol4,
 			},
 		}
-	case 3:
+	case constant.IPv6Only:
 		o = stack.Options{
 			NetworkProtocols: []stack.NetworkProtocolFactory{
 				ipv6.NewProtocol,
