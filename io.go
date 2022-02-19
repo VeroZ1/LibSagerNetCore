@@ -6,11 +6,14 @@ import (
 	"os"
 
 	"github.com/ulikunitz/xz"
+	"github.com/v2fly/v2ray-core/v5/common/buf"
+	"libcore/comm"
 )
 
 type packetConn interface {
-	net.PacketConn
 	readFrom() (p []byte, addr net.Addr, err error)
+	writeTo(buffer *buf.Buffer, addr net.Addr) (err error)
+	io.Closer
 }
 
 func Unxz(archive string, path string) error {
@@ -20,16 +23,16 @@ func Unxz(archive string, path string) error {
 	}
 	r, err := xz.NewReader(i)
 	if err != nil {
-		closeIgnore(i)
+		comm.CloseIgnore(i)
 		return err
 	}
 	o, err := os.Create(path)
 	if err != nil {
-		closeIgnore(i)
+		comm.CloseIgnore(i)
 		return err
 	}
 	_, err = io.Copy(o, r)
-	closeIgnore(i, o)
+	comm.CloseIgnore(i, o)
 	return err
 }
 

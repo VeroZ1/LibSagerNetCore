@@ -7,9 +7,9 @@ import (
 
 	"github.com/Dreamacro/clash/transport/ssr/obfs"
 	"github.com/Dreamacro/clash/transport/ssr/protocol"
-	"github.com/v2fly/v2ray-core/v4/common/buf"
-	"github.com/v2fly/v2ray-core/v4/proxy/shadowsocks"
-	"github.com/v2fly/v2ray-core/v4/transport/internet"
+	"github.com/v2fly/v2ray-core/v5/common/buf"
+	"github.com/v2fly/v2ray-core/v5/proxy/shadowsocks"
+	"github.com/v2fly/v2ray-core/v5/transport/internet"
 )
 
 var (
@@ -94,22 +94,31 @@ func (p *shadowsocksrPlugin) ProtocolConn(conn *shadowsocks.ProtocolConn, iv []b
 	}
 }
 
-func (p *shadowsocksrPlugin) EncodePacket(buffer *buf.Buffer) (*buf.Buffer, error) {
+func (p *shadowsocksrPlugin) EncodePacket(buffer *buf.Buffer, ivLen int32) (*buf.Buffer, error) {
+	defer buffer.Release()
 	packet := &bytes.Buffer{}
-	err := p.p.EncodePacket(packet, buffer.Bytes())
-	buffer.Release()
+	err := p.p.EncodePacket(packet, buffer.BytesFrom(ivLen))
 	if err != nil {
-		buffer.Release()
 		return nil, err
 	}
-	return buf.FromBytes(packet.Bytes()), nil
+	if ivLen > 0 {
+		newBuffer := buf.New()
+		newBuffer.Write(buffer.BytesTo(ivLen))
+		newBuffer.Write(packet.Bytes())
+		return newBuffer, nil
+	} else {
+		return buf.FromBytes(packet.Bytes()), nil
+	}
 }
 
 func (p *shadowsocksrPlugin) DecodePacket(buffer *buf.Buffer) (*buf.Buffer, error) {
+	defer buffer.Release()
 	packet, err := p.p.DecodePacket(buffer.Bytes())
-	buffer.Release()
 	if err != nil {
 		return nil, err
 	}
-	return buf.FromBytes(packet), nil
+	newBuffer := buf.New()
+	newBuffer.Write(packet)
+	newBuffer.Endpoint = buffer.Endpoint
+	return newBuffer, nil
 }

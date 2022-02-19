@@ -2,8 +2,9 @@ package libcore
 
 import (
 	"github.com/golang/protobuf/proto"
-	"github.com/v2fly/v2ray-core/v4/app/observatory"
-	"github.com/v2fly/v2ray-core/v4/features/extension"
+	"github.com/sirupsen/logrus"
+	"github.com/v2fly/v2ray-core/v5/app/observatory"
+	"github.com/v2fly/v2ray-core/v5/features/extension"
 )
 
 func (instance *V2RayInstance) GetObservatoryStatus(tag string) ([]byte, error) {
@@ -41,7 +42,7 @@ func (instance *V2RayInstance) UpdateStatus(tag string, status []byte) error {
 }
 
 type StatusUpdateListener interface {
-	OnUpdate(status []byte)
+	OnUpdate(status []byte) error
 }
 
 func (instance *V2RayInstance) SetStatusUpdateListener(tag string, listener StatusUpdateListener) error {
@@ -58,7 +59,10 @@ func (instance *V2RayInstance) SetStatusUpdateListener(tag string, listener Stat
 		}
 		observer.(*observatory.Observer).StatusUpdate = func(result *observatory.OutboundStatus) {
 			status, _ := proto.Marshal(result)
-			listener.OnUpdate(status)
+			err = listener.OnUpdate(status)
+			if err != nil {
+				logrus.Warn("failed to send observatory status update: ", err)
+			}
 		}
 	}
 	return nil

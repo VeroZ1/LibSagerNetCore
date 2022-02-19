@@ -1,8 +1,12 @@
+//go:build !disable_debug
+
 package libcore
 
 import (
 	"net/http"
 	_ "net/http/pprof"
+
+	"libcore/comm"
 )
 
 type DebugInstance struct {
@@ -20,5 +24,5 @@ func NewDebugInstance() *DebugInstance {
 }
 
 func (d *DebugInstance) Close() {
-	closeIgnore(d.server)
+	comm.CloseIgnore(d.server)
 }

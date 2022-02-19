@@ -5,7 +5,8 @@ import (
 	"net"
 	"strconv"
 
-	v2rayNet "github.com/v2fly/v2ray-core/v4/common/net"
+	"github.com/v2fly/v2ray-core/v5/common/buf"
+	v2rayNet "github.com/v2fly/v2ray-core/v5/common/net"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -48,7 +49,7 @@ func gUdpHandler(s *stack.Stack, handler tun.Handler) {
 			IP:   dst.Address.IP(),
 			Port: int(dst.Port),
 		}
-		go handler.NewPacket(src, dst, data.ToView(), func(bytes []byte, addr *net.UDPAddr) (int, error) {
+		go handler.NewPacket(src, dst, buf.FromBytes(data.ToView()), func(bytes []byte, addr *net.UDPAddr) (int, error) {
 			if addr == nil {
 				addr = destUdpAddr
 			}

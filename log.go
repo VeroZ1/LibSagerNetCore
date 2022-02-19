@@ -1,6 +1,3 @@
-//go:build android
-// +build android
-
 package libcore
 
 /*
@@ -13,14 +10,13 @@ package libcore
 import "C"
 
 import (
-	"fmt"
 	"log"
 	"strings"
 	"unsafe"
 
 	"github.com/sirupsen/logrus"
-	appLog "github.com/v2fly/v2ray-core/v4/app/log"
-	commonLog "github.com/v2fly/v2ray-core/v4/common/log"
+	appLog "github.com/v2fly/v2ray-core/v5/app/log"
+	commonLog "github.com/v2fly/v2ray-core/v5/common/log"
 )
 
 var (
@@ -42,8 +38,7 @@ type androidHook struct{}
 type androidFormatter struct{}
 
 func (f *androidFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	msgWithLevel := fmt.Sprint("[", strings.Title(entry.Level.String()), "] ", entry.Message)
-	return []byte(msgWithLevel), nil
+	return []byte(entry.Message), nil
 }
 
 func (hook *androidHook) Levels() []logrus.Level {
