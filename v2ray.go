@@ -202,6 +202,17 @@ func (instance *V2RayInstance) dialContext(ctx context.Context, destination net.
 	return buf.NewConnection(buf.ConnectionInputMulti(r.Writer), readerOpt), nil
 }
 
+func (instance *V2RayInstance) dispatchContext(ctx context.Context, destination net.Destination, conn net.Conn) error {
+	if !instance.started {
+		return os.ErrInvalid
+	}
+	ctx = core.WithContext(ctx, instance.core)
+	return instance.dispatcher.DispatchLink(ctx, destination, &transport.Link{
+		Reader: buf.NewReader(conn),
+		Writer: buf.NewWriter(conn),
+	})
+}
+
 func (instance *V2RayInstance) dialUDP(ctx context.Context, destination net.Destination, timeout time.Duration) (packetConn, error) {
 	if !instance.started {
 		return nil, os.ErrInvalid
@@ -258,6 +269,10 @@ type dispatcherConn struct {
 	cache  chan *udp.Packet
 }
 
+func (c *dispatcherConn) IsPipe() bool {
+	return true
+}
+
 func (c *dispatcherConn) handleInput() {
 	defer c.Close()
 	for {
@@ -305,6 +320,7 @@ func (c *dispatcherConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, io.EOF
 	case packet := <-c.cache:
 		n := copy(p, packet.Payload.Bytes())
+		packet.Payload.Release()
 		return n, &net.UDPAddr{
 			IP:   packet.Source.Address.IP(),
 			Port: int(packet.Source.Port),
@@ -312,7 +328,7 @@ func (c *dispatcherConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	}
 }
 
-func (c *dispatcherConn) readFrom() (p []byte, addr net.Addr, err error) {
+func (c *dispatcherConn) readFrom() (buffer *buf.Buffer, addr net.Addr, err error) {
 	select {
 	case <-c.ctx.Done():
 		return nil, nil, io.EOF
@@ -320,7 +336,7 @@ func (c *dispatcherConn) readFrom() (p []byte, addr net.Addr, err error) {
 		if !ok {
 			return nil, nil, io.EOF
 		}
-		return packet.Payload.Bytes(), &net.UDPAddr{
+		return packet.Payload, &net.UDPAddr{
 			IP:   packet.Source.Address.IP(),
 			Port: int(packet.Source.Port),
 		}, nil
@@ -357,6 +373,10 @@ func (c *dispatcherConn) writeTo(buffer *buf.Buffer, addr net.Addr) (err error) 
 	return
 }
 
+func (c *dispatcherConn) RemoteAddr() net.Addr {
+	return nil
+}
+
 func (c *dispatcherConn) LocalAddr() net.Addr {
 	return &net.UDPAddr{
 		IP:   []byte{0, 0, 0, 0},
@@ -368,16 +388,8 @@ func (c *dispatcherConn) Close() error {
 	if c.closed {
 		return nil
 	}
-
-	c.access.Lock()
-	defer c.access.Unlock()
-
-	if c.closed {
-		return nil
-	}
 	c.closed = true
 
-	c.timer.SetTimeout(0)
 	c.cancel()
 	_ = common.Interrupt(c.link.Reader)
 	_ = common.Interrupt(c.link.Writer)

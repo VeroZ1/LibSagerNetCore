@@ -11,7 +11,7 @@ import (
 )
 
 type packetConn interface {
-	readFrom() (p []byte, addr net.Addr, err error)
+	readFrom() (buffer *buf.Buffer, addr net.Addr, err error)
 	writeTo(buffer *buf.Buffer, addr net.Addr) (err error)
 	io.Closer
 }

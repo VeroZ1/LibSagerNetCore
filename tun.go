@@ -1,5 +1,6 @@
 package libcore
 
+import "C"
 import (
 	"context"
 	"fmt"
@@ -19,14 +20,11 @@ import (
 	v2rayNet "github.com/v2fly/v2ray-core/v5/common/net"
 	"github.com/v2fly/v2ray-core/v5/common/net/pingproto"
 	"github.com/v2fly/v2ray-core/v5/common/session"
-	"github.com/v2fly/v2ray-core/v5/common/task"
 	"github.com/v2fly/v2ray-core/v5/features/dns/localdns"
 	"github.com/v2fly/v2ray-core/v5/features/outbound"
 	routing_session "github.com/v2fly/v2ray-core/v5/features/routing/session"
 	"github.com/v2fly/v2ray-core/v5/proxy/wireguard"
-	"github.com/v2fly/v2ray-core/v5/transport"
 	"github.com/v2fly/v2ray-core/v5/transport/internet"
-	"github.com/v2fly/v2ray-core/v5/transport/pipe"
 	"golang.org/x/sys/unix"
 	"libcore/comm"
 	"libcore/gvisor"
@@ -168,6 +166,9 @@ func (t *Tun2ray) Close() {
 }
 
 func (t *Tun2ray) NewConnection(source v2rayNet.Destination, destination v2rayNet.Destination, conn net.Conn) {
+	element := v2rayNet.AddConnection(conn)
+	defer v2rayNet.RemoveConnection(element)
+
 	inbound := &session.Inbound{
 		Source:      source,
 		Tag:         "tun",
@@ -250,7 +251,7 @@ func (t *Tun2ray) NewConnection(source v2rayNet.Destination, destination v2rayNe
 		atomic.AddInt32(&stats.tcpConn, 1)
 		atomic.AddUint32(&stats.tcpConnTotal, 1)
 		atomic.StoreInt64(&stats.deactivateAt, 0)
-		conn = statsConn{conn, &stats.uplink, &stats.downlink}
+		conn = NewStatsCounterConn(conn, &stats.uplink, &stats.downlink)
 		stats.Lock()
 		statsElement := stats.connections.PushBack(conn)
 		stats.Unlock()
@@ -263,30 +264,9 @@ func (t *Tun2ray) NewConnection(source v2rayNet.Destination, destination v2rayNe
 			stats.Unlock()
 		}()
 	}
+	inbound.Conn = conn
 
-	element := v2rayNet.AddConnection(conn)
-	defer v2rayNet.RemoveConnection(element)
-
-	reader, input := pipe.New()
-	defer comm.CloseIgnore(input)
-	link := &transport.Link{
-		Reader: reader,
-		Writer: connWriter{conn, buf.NewWriter(conn)},
-	}
-	err := t.v2ray.dispatcher.DispatchLink(ctx, destination, link)
-	if err != nil {
-		newError("[TCP] dispatchLink failed: ", err).WriteToLog()
-		return
-	}
-
-	task.Run(ctx, func() error {
-		return buf.Copy(buf.NewReader(conn), input)
-	})
-}
-
-type connWriter struct {
-	net.Conn
-	buf.Writer
+	_ = t.v2ray.dispatcher.DispatchConn(ctx, destination, conn, true)
 }
 
 func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.Destination, data *buf.Buffer, writeBack func([]byte, *net.UDPAddr) (int, error), closer io.Closer) {
@@ -407,6 +387,8 @@ func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.De
 		logrus.Errorf("[UDP] dial failed: %s", err.Error())
 		return
 	}
+	element := v2rayNet.AddConnection(conn)
+	defer v2rayNet.RemoveConnection(element)
 
 	var stats *appStats
 	if t.trafficStats && !self && !isDns {
@@ -448,9 +430,6 @@ func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.De
 		}()
 	}
 
-	element := v2rayNet.AddConnection(conn)
-	defer v2rayNet.RemoveConnection(element)
-
 	t.udpTable.Store(natKey, conn)
 
 	go sendTo()
@@ -467,10 +446,11 @@ func (t *Tun2ray) NewPacket(source v2rayNet.Destination, destination v2rayNet.De
 			addr = nil
 		}
 		if addr, ok := addr.(*net.UDPAddr); ok {
-			_, err = writeBack(buffer, addr)
+			_, err = writeBack(buffer.Bytes(), addr)
 		} else {
-			_, err = writeBack(buffer, nil)
+			_, err = writeBack(buffer.Bytes(), nil)
 		}
+		buffer.Release()
 		if err != nil {
 			break
 		}
@@ -568,7 +548,8 @@ func (t *Tun2ray) NewPingPacket(source v2rayNet.Destination, destination v2rayNe
 				newError("failed to read ping response from ", destination.Address).Base(err).WriteToLog()
 				break
 			}
-			err = writeBack(buffer)
+			err = writeBack(buffer.Bytes())
+			buffer.Release()
 			if err != nil {
 				if err != unix.ENETUNREACH {
 					newError("failed to write ping response back").Base(err).WriteToLog()
